@@ -178,127 +178,118 @@ type: article
         {%- endfor -%}
       </div>
 
-   <script>
-  // Robust badge-aware sorting:
-  // Group order:
-  // 0 = trending + recently_added
-  // 1 = recently_added only
-  // 2 = trending only
-  // 3 = neither
-  // - normalizes badge strings (trim + lower)
-  // - tolerates missing/malformed data-badges
-  // - logs items with unparsable badges for debugging
-
-  function readBadgesNormalized(li) {
-    const raw = li.getAttribute('data-badges') || '[]';
-    let arr;
+  <script>
+(function(){
+  // --- Utilities ---
+  function safeParseBadges(raw) {
+    raw = raw === undefined || raw === null ? '[]' : String(raw);
+    raw = raw.trim();
+    // Already JSON?
     try {
-      arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) arr = [];
-    } catch (e) {
-      // Try a fallback: sometimes badges are rendered as a single string
-      try {
-        const text = String(raw).trim();
-        if (text.startsWith('[') && text.endsWith(']')) {
-          // last resort: try to eval-ish (NOT recommended normally, but safe-ish here as a fallback)
-          arr = JSON.parse(text.replace(/([a-zA-Z0-9_-]+)\s*:/g, '"$1":')); // attempt to help malformed
-        } else if (text === '') {
-          arr = [];
-        } else {
-          // split on commas if it looks like "a, b, c"
-          arr = text.split(',').map(s => s.trim()).filter(Boolean);
-        }
-      } catch (e2) {
-        console.warn('Could not parse data-badges for', li, raw);
-        arr = [];
-      }
-    }
-    // normalize (trim + lowercase)
-    return arr.map(x => String(x).trim().toLowerCase());
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(s=>String(s).trim());
+      // if parsed is an object, try to read keys as badges (unlikely)
+    } catch(e){}
+    // Try comma-separated fallback
+    if (raw === '' || raw === '[]') return [];
+    // remove wrapping quotes/brackets if weird
+    const cleaned = raw.replace(/^[\[\]'" ]+|[\[\]'" ]+$/g,'');
+    return cleaned.split(',').map(s => s.trim()).filter(Boolean);
   }
 
-  function computeBadgeRank(badges) {
-    const isTrending = badges.includes('trending');
-    const isRecent = badges.includes('recently_added') || badges.includes('recently-added') || badges.includes('recentlyadded');
+  function norm(arr) {
+    return (arr||[]).map(x => String(x).trim().toLowerCase());
+  }
+
+  function badgeRankFromNorm(normed) {
+    const isTrending = normed.includes('trending');
+    const isRecent = normed.includes('recently_added') || normed.includes('recently-added') || normed.includes('recentlyadded');
     if (isTrending && isRecent) return 0;
     if (isRecent) return 1;
     if (isTrending) return 2;
     return 3;
   }
 
-  function sortProjectsCustom() {
+  // --- main sorter (stable) ---
+  function sortAllProjectLists() {
     document.querySelectorAll('.project-list').forEach(ul => {
       const items = Array.from(ul.querySelectorAll(':scope > .project-item'));
       const decorated = items.map((el, idx) => {
-        const badges = readBadgesNormalized(el);
-        const rank = computeBadgeRank(badges);
-        return { el, idx, rank };
+        const rawBadges = el.getAttribute('data-badges') || el.dataset.badges || '[]';
+        const parsed = safeParseBadges(rawBadges);
+        const normed = norm(parsed);
+        const rank = badgeRankFromNorm(normed);
+        return { el, idx, rank, normed };
       });
 
-      decorated.sort((a, b) => {
-        if (a.rank !== b.rank) return a.rank - b.rank;
-        return a.idx - b.idx; // stable sort: keep original order within same rank
-      });
+      // diagnostics: log counts
+      const counts = decorated.reduce((acc,d)=>{ acc[d.rank]= (acc[d.rank]||0)+1; return acc; },{});
+      console.info('project-list:', ul, 'counts by rank:', counts);
 
-      // append in sorted order (this moves elements rather than cloning)
+      // stable sort
+      decorated.sort((a,b) => a.rank - b.rank || a.idx - b.idx);
+
+      // Re-append in order (moves nodes)
       decorated.forEach(d => ul.appendChild(d.el));
-    });
-  }
 
-  // Fix for filterProjects: dataset property name for support level is data-support-level,
-  // so dataset property is "supportLevel" (camelCase). Use getAttribute fallback to be safe.
-  function getDataArray(li, attrName, datasetKey) {
-    // prefer dataset (handles camelCase) but fallback to attribute
-    const ds = li.dataset && li.dataset[datasetKey];
-    const raw = ds !== undefined ? ds : li.getAttribute(attrName) || '[]';
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (e) {
-      // fallback to comma-separated
-      return String(raw).split(',').map(s => s.trim()).filter(Boolean);
-    }
-  }
-
-  function filterProjects() {
-    const checks = Array.from(document.querySelectorAll('.filter-checkbox:checked'));
-    if (checks.length === 0) {
-      document.querySelectorAll('.project-item').forEach(el => el.style.display = '');
-      return;
-    }
-    const activeFilters = checks.map(cb => ({ cat: cb.dataset.category, val: cb.value }));
-    document.querySelectorAll('.project-item').forEach(li => {
-      const plats   = getDataArray(li, 'data-platforms', 'platforms');
-      const subs    = getDataArray(li, 'data-subjects', 'subjects');
-      const swhws   = getDataArray(li, 'data-swhw', 'swhw');
-      const levels  = getDataArray(li, 'data-support-level', 'supportLevel'); // fallback-safe
-      const ok = activeFilters.every(f => {
-        switch (f.cat) {
-          case 'platform':      return plats.includes(f.val);
-          case 'subject':       return subs.includes(f.val);
-          case 'sw-hw':         return swhws.includes(f.val);
-          case 'support-level': return levels.includes(f.val);
-          default:              return true;
-        }
+      // diagnostic: show any element that claims trending but ended up after a lower-priority item
+      const finalOrder = Array.from(ul.querySelectorAll(':scope > .project-item'));
+      // find first index of any non-trending group (rank>2) and any trending after it
+      const indexOfFirstNonTop = finalOrder.findIndex(li => {
+        const p = safeParseBadges(li.getAttribute('data-badges') || li.dataset.badges || '[]');
+        const nn = norm(p);
+        const r = badgeRankFromNorm(nn);
+        return r > 2; // 3 = neither; treat >2 as lower priority than trending
       });
-      li.style.display = ok ? '' : 'none';
+      if (indexOfFirstNonTop > -1) {
+        finalOrder.forEach((li, i) => {
+          const p = norm(safeParseBadges(li.getAttribute('data-badges') || li.dataset.badges || '[]'));
+          const r = badgeRankFromNorm(p);
+          if ((p.includes('trending') || p.includes('recently_added')) && i > indexOfFirstNonTop && r <= 2) {
+            console.warn('Possible misplacement: trending/recent item appears after lower-priority items:', {li, index:i, rank:r, badges:p});
+          }
+        });
+      }
     });
   }
 
-  // If you suspect another script mutates the list after DOMContentLoaded,
-  // run the sorter again a short time later to re-enforce ordering.
-  // Run immediately on DOMContentLoaded, and again after a brief delay.
-  document.addEventListener('DOMContentLoaded', () => {
-    try { sortProjectsCustom(); } catch (e) { console.error(e); }
-    // re-run after 250ms and 1000ms to catch late mutations (safe, small overhead)
-    setTimeout(sortProjectsCustom, 250);
-    setTimeout(sortProjectsCustom, 1000);
+  // --- watch for mutations and re-sort ---
+  const observer = new MutationObserver(muts => {
+    // If any childList changed inside a project-results container, re-sort after microtask to let other scripts settle
+    let shouldSort = false;
+    for (const m of muts) {
+      if (m.type === 'childList' || m.type === 'attributes') shouldSort = true;
+    }
+    if (shouldSort) {
+      // small debounce
+      if (observer._timer) clearTimeout(observer._timer);
+      observer._timer = setTimeout(() => {
+        try { sortAllProjectLists(); } catch(e){ console.error(e); }
+      }, 75);
+    }
   });
 
-  // expose functions for debugging from console
-  window.__arm_sortProjectsCustom = sortProjectsCustom;
-  window.__arm_readBadgesNormalized = readBadgesNormalized;
+  function startObserving() {
+    const container = document.querySelector('.project-results') || document.body;
+    observer.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-badges'] });
+  }
+
+  // run on load and start observer
+  document.addEventListener('DOMContentLoaded', () => {
+    try { sortAllProjectLists(); } catch(e){ console.error(e); }
+    // run again short delays to catch late scripts
+    setTimeout(sortAllProjectLists, 200);
+    setTimeout(sortAllProjectLists, 800);
+    startObserving();
+  });
+
+  // expose helpers for debugging in console
+  window.__arm_debug_sortAllProjectLists = sortAllProjectLists;
+  window.__arm_debug_parseBadges = safeParseBadges;
+  window.__arm_debug_norm = norm;
+})();
 </script>
+
 
     {%- endif -%}
   </div>
@@ -311,6 +302,7 @@ type: article
     {%- include article-footer.html -%}
   </div>
 </div>
+
 
 
 
