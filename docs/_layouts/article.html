@@ -178,51 +178,88 @@ type: article
         {%- endfor -%}
       </div>
 
-    <script>
-  // Sort priority:
+   <script>
+  // Robust badge-aware sorting:
+  // Group order:
   // 0 = trending + recently_added
   // 1 = recently_added only
   // 2 = trending only
   // 3 = neither
-  function badgeIncludes(li, badge) {
+  // - normalizes badge strings (trim + lower)
+  // - tolerates missing/malformed data-badges
+  // - logs items with unparsable badges for debugging
+
+  function readBadgesNormalized(li) {
+    const raw = li.getAttribute('data-badges') || '[]';
+    let arr;
     try {
-      const badges = JSON.parse(li.dataset.badges || '[]');
-      return Array.isArray(badges) && badges.includes(badge);
+      arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) arr = [];
     } catch (e) {
-      return false;
+      // Try a fallback: sometimes badges are rendered as a single string
+      try {
+        const text = String(raw).trim();
+        if (text.startsWith('[') && text.endsWith(']')) {
+          // last resort: try to eval-ish (NOT recommended normally, but safe-ish here as a fallback)
+          arr = JSON.parse(text.replace(/([a-zA-Z0-9_-]+)\s*:/g, '"$1":')); // attempt to help malformed
+        } else if (text === '') {
+          arr = [];
+        } else {
+          // split on commas if it looks like "a, b, c"
+          arr = text.split(',').map(s => s.trim()).filter(Boolean);
+        }
+      } catch (e2) {
+        console.warn('Could not parse data-badges for', li, raw);
+        arr = [];
+      }
     }
+    // normalize (trim + lowercase)
+    return arr.map(x => String(x).trim().toLowerCase());
+  }
+
+  function computeBadgeRank(badges) {
+    const isTrending = badges.includes('trending');
+    const isRecent = badges.includes('recently_added') || badges.includes('recently-added') || badges.includes('recentlyadded');
+    if (isTrending && isRecent) return 0;
+    if (isRecent) return 1;
+    if (isTrending) return 2;
+    return 3;
   }
 
   function sortProjectsCustom() {
     document.querySelectorAll('.project-list').forEach(ul => {
       const items = Array.from(ul.querySelectorAll(':scope > .project-item'));
-
-      // decorate with original index for stable sort
       const decorated = items.map((el, idx) => {
-        const isTrending = badgeIncludes(el, 'trending');
-        const isRecent = badgeIncludes(el, 'recently_added');
-        let rank;
-        if (isTrending && isRecent) rank = 0;
-        else if (isRecent) rank = 1;
-        else if (isTrending) rank = 2;
-        else rank = 3;
+        const badges = readBadgesNormalized(el);
+        const rank = computeBadgeRank(badges);
         return { el, idx, rank };
       });
 
       decorated.sort((a, b) => {
         if (a.rank !== b.rank) return a.rank - b.rank;
-        return a.idx - b.idx; // stable: preserve original order within same rank
+        return a.idx - b.idx; // stable sort: keep original order within same rank
       });
 
+      // append in sorted order (this moves elements rather than cloning)
       decorated.forEach(d => ul.appendChild(d.el));
     });
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
-    sortProjectsCustom();
-  });
+  // Fix for filterProjects: dataset property name for support level is data-support-level,
+  // so dataset property is "supportLevel" (camelCase). Use getAttribute fallback to be safe.
+  function getDataArray(li, attrName, datasetKey) {
+    // prefer dataset (handles camelCase) but fallback to attribute
+    const ds = li.dataset && li.dataset[datasetKey];
+    const raw = ds !== undefined ? ds : li.getAttribute(attrName) || '[]';
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      // fallback to comma-separated
+      return String(raw).split(',').map(s => s.trim()).filter(Boolean);
+    }
+  }
 
-  // --- Existing filtering (unchanged) ---
   function filterProjects() {
     const checks = Array.from(document.querySelectorAll('.filter-checkbox:checked'));
     if (checks.length === 0) {
@@ -231,10 +268,10 @@ type: article
     }
     const activeFilters = checks.map(cb => ({ cat: cb.dataset.category, val: cb.value }));
     document.querySelectorAll('.project-item').forEach(li => {
-      const plats   = JSON.parse(li.dataset.platforms    || '[]');
-      const subs    = JSON.parse(li.dataset.subjects     || '[]');
-      const swhws   = JSON.parse(li.dataset.swhw         || '[]');
-      const levels  = JSON.parse(li.dataset.supportLevel || '[]');
+      const plats   = getDataArray(li, 'data-platforms', 'platforms');
+      const subs    = getDataArray(li, 'data-subjects', 'subjects');
+      const swhws   = getDataArray(li, 'data-swhw', 'swhw');
+      const levels  = getDataArray(li, 'data-support-level', 'supportLevel'); // fallback-safe
       const ok = activeFilters.every(f => {
         switch (f.cat) {
           case 'platform':      return plats.includes(f.val);
@@ -247,6 +284,20 @@ type: article
       li.style.display = ok ? '' : 'none';
     });
   }
+
+  // If you suspect another script mutates the list after DOMContentLoaded,
+  // run the sorter again a short time later to re-enforce ordering.
+  // Run immediately on DOMContentLoaded, and again after a brief delay.
+  document.addEventListener('DOMContentLoaded', () => {
+    try { sortProjectsCustom(); } catch (e) { console.error(e); }
+    // re-run after 250ms and 1000ms to catch late mutations (safe, small overhead)
+    setTimeout(sortProjectsCustom, 250);
+    setTimeout(sortProjectsCustom, 1000);
+  });
+
+  // expose functions for debugging from console
+  window.__arm_sortProjectsCustom = sortProjectsCustom;
+  window.__arm_readBadgesNormalized = readBadgesNormalized;
 </script>
 
     {%- endif -%}
@@ -260,6 +311,7 @@ type: article
     {%- include article-footer.html -%}
   </div>
 </div>
+
 
 
 
