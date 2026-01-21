@@ -178,32 +178,40 @@ type: article
         {%- endfor -%}
       </div>
 
-     <script>
-  // Put projects with badge key "recently_added" first (per category list)
-  function hasRecentlyAddedBadge(li) {
-    let badges = [];
+    <script>
+  // Sort priority:
+  // 0 = trending + recently_added
+  // 1 = recently_added only
+  // 2 = trending only
+  // 3 = neither
+  function badgeIncludes(li, badge) {
     try {
-      badges = JSON.parse(li.dataset.badges || '[]');
+      const badges = JSON.parse(li.dataset.badges || '[]');
+      return Array.isArray(badges) && badges.includes(badge);
     } catch (e) {
-      badges = [];
+      return false;
     }
-    return Array.isArray(badges) && badges.includes('recently_added');
   }
 
-  function sortProjectsRecentlyAddedFirst() {
+  function sortProjectsCustom() {
     document.querySelectorAll('.project-list').forEach(ul => {
       const items = Array.from(ul.querySelectorAll(':scope > .project-item'));
 
-      // stable sort: decorate with original index
-      const decorated = items.map((el, idx) => ({
-        el,
-        idx,
-        isRecent: hasRecentlyAddedBadge(el)
-      }));
+      // decorate with original index for stable sort
+      const decorated = items.map((el, idx) => {
+        const isTrending = badgeIncludes(el, 'trending');
+        const isRecent = badgeIncludes(el, 'recently_added');
+        let rank;
+        if (isTrending && isRecent) rank = 0;
+        else if (isRecent) rank = 1;
+        else if (isTrending) rank = 2;
+        else rank = 3;
+        return { el, idx, rank };
+      });
 
       decorated.sort((a, b) => {
-        if (a.isRecent !== b.isRecent) return a.isRecent ? -1 : 1; // recent first
-        return a.idx - b.idx; // preserve original order otherwise
+        if (a.rank !== b.rank) return a.rank - b.rank;
+        return a.idx - b.idx; // stable: preserve original order within same rank
       });
 
       decorated.forEach(d => ul.appendChild(d.el));
@@ -211,7 +219,7 @@ type: article
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    sortProjectsRecentlyAddedFirst();
+    sortProjectsCustom();
   });
 
   // --- Existing filtering (unchanged) ---
@@ -240,6 +248,7 @@ type: article
     });
   }
 </script>
+
     {%- endif -%}
   </div>
 
@@ -251,5 +260,6 @@ type: article
     {%- include article-footer.html -%}
   </div>
 </div>
+
 
 
